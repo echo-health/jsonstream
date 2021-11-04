@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
-	"strings"
+	"regexp"
 
 	"github.com/pkg/errors"
 )
@@ -13,17 +13,17 @@ import (
 func New(r io.Reader) *Decoder {
 	return &Decoder{
 		dec:      json.NewDecoder(r),
-		matchers: map[string]func(key string, token json.Token) error{},
+		matchers: map[string]func(key string) error{},
 	}
 }
 
 type Decoder struct {
 	dec      *json.Decoder
-	matchers map[string]func(key string, token json.Token) error
+	matchers map[string]func(key string) error
 }
 
 func (d *Decoder) Decode() error {
-	err := d.next([]string{"!"})
+	err := d.next("$")
 	if err != nil && err != io.EOF {
 		return err
 	}
@@ -50,28 +50,47 @@ func (d *Decoder) On(path string, handler interface{}) error {
 
 	fn := reflect.ValueOf(handler)
 
-	d.matchers[path] = func(key string, t json.Token) error {
-		values := []reflect.Value{
-			reflect.ValueOf(key),
-		}
+	d.matchers[path] = func(key string) (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				s, ok := r.(string)
+				if ok {
+					err = errors.New(s)
+					return
+				}
+				e, ok := r.(error)
+				if ok {
+					err = e
+					return
+				}
+
+				panic(r)
+			}
+		}()
 
 		inType := hndlr.In(1)
-		if inType.Kind() == reflect.Ptr {
-			inType = inType.Elem()
-		}
+
+		// // if the receiving type is a pointer get it's underling type
+		// if inType.Kind() == reflect.Ptr {
+		// 	inType = inType.Elem()
+		// }
 
 		obj := reflect.New(inType).Interface()
 
-		err := d.dec.Decode(obj)
+		err = d.dec.Decode(obj)
 		if err != nil {
 			return err
 		}
 
-		if inType.Kind() != reflect.Ptr {
-			obj = reflect.ValueOf(obj).Elem().Interface()
-		}
+		// if the receiving type is NOT a pointer then deference to value
+		// if hndlr.In(1).Kind() != reflect.Ptr {
+		obj = reflect.ValueOf(obj).Elem().Interface()
+		// }
 
-		values = append(values, reflect.ValueOf(obj))
+		values := []reflect.Value{
+			reflect.ValueOf(key),
+			reflect.ValueOf(obj),
+		}
 
 		rtrn := fn.Call(values)
 		if len(rtrn) == 0 {
@@ -89,11 +108,53 @@ func (d *Decoder) On(path string, handler interface{}) error {
 	return nil
 }
 
-func (d *Decoder) next(basePath []string) error {
+var pathRegexp = regexp.MustCompile(`([\w\*]+)(\[[\w\*]+\])?(\.|$)`)
+
+func pathMatch(path string, filter string) bool {
+	pathParts := pathRegexp.FindAllStringSubmatch(path, -1)
+	filterParts := pathRegexp.FindAllStringSubmatch(filter, -1)
+
+	if len(pathParts) != len(filterParts) {
+		return false
+	}
+
+	for i, part := range pathParts {
+		key := part[1]
+		arr := part[2]
+
+		filterPart := filterParts[i]
+		filterKey := filterPart[1]
+		filterArr := filterPart[2]
+
+		// if key doesn't match return
+		if key != filterKey && filterKey != "*" {
+			return false
+		}
+
+		// if the path has an array part but the filter doesn't (or vice-versa) return
+		if (arr != "") != (filterArr != "") {
+			return false
+		}
+
+		// if no array part continue
+		if arr == "" {
+			continue
+		}
+
+		// if array parts don't match return
+		if arr != filterArr && filterArr != "[*]" {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (d *Decoder) next(path string) error {
 	// See if we have a match for where we are
 	for p, h := range d.matchers {
-		if p == strings.Join(basePath, "") {
-			return h(strings.Join(basePath, ""), nil)
+		if pathMatch(path, p) {
+			return h(path)
 		}
 	}
 
@@ -108,19 +169,19 @@ func (d *Decoder) next(basePath []string) error {
 		switch delim {
 		case '{':
 			// start processing the object
-			return d.next(append(basePath[:], "."))
+			return d.next(path + ".")
 		case '[':
 			// process each entry in the array
 			index := 0
 			for d.dec.More() {
-				err = d.next(append(basePath[:], fmt.Sprintf("[%d]", index)))
+				err = d.next(path + fmt.Sprintf("[%d]", index))
 				if err != nil {
 					return err
 				}
 				index++
 			}
 			// carry on parsing
-			return d.next(basePath)
+			return d.next(path)
 		case '}':
 			return nil
 		case ']':
@@ -131,20 +192,20 @@ func (d *Decoder) next(basePath []string) error {
 	}
 
 	// handle an object key or value
-	if len(basePath) > 0 && basePath[len(basePath)-1] == "." {
+	if len(path) > 0 && path[len(path)-1] == '.' {
 		key, ok := t.(string)
 		if !ok {
 			return fmt.Errorf("not a string")
 		}
 
 		// go to value (could be a nested object or array)
-		err = d.next(append(basePath[:], key))
+		err = d.next(path + key)
 		if err != nil {
 			return err
 		}
 
 		// go to next key (or possible end of object)
-		return d.next(basePath)
+		return d.next(path)
 	}
 
 	// handled (primitive) value of object or array
