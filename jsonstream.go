@@ -70,11 +70,6 @@ func (d *Decoder) On(path string, handler interface{}) error {
 
 		inType := hndlr.In(1)
 
-		// // if the receiving type is a pointer get it's underling type
-		// if inType.Kind() == reflect.Ptr {
-		// 	inType = inType.Elem()
-		// }
-
 		obj := reflect.New(inType).Interface()
 
 		err = d.dec.Decode(obj)
@@ -82,10 +77,7 @@ func (d *Decoder) On(path string, handler interface{}) error {
 			return err
 		}
 
-		// if the receiving type is NOT a pointer then deference to value
-		// if hndlr.In(1).Kind() != reflect.Ptr {
 		obj = reflect.ValueOf(obj).Elem().Interface()
-		// }
 
 		values := []reflect.Value{
 			reflect.ValueOf(key),
@@ -108,6 +100,14 @@ func (d *Decoder) On(path string, handler interface{}) error {
 	return nil
 }
 
+// For the input "a.b.*.d[*]" using FindAllStringSubmatch results in
+// [
+//   ["a.",   "a", "",    "."],
+//   ["b.",   "b", "",    "."],
+//   ["*.",   "*", "",    "."],
+//   ["d[*]", "d", "[*]", "" ]
+// ]
+// We care about match 1 (key) and 2 (array access).
 var pathRegexp = regexp.MustCompile(`([\w\*]+)(\[[\w\*]+\])?(\.|$)`)
 
 func pathMatch(path string, filter string) bool {
