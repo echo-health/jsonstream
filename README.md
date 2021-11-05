@@ -27,7 +27,7 @@ func main() {
         }
     `))
 
-	// visits every element in "a.b.c"
+	// visits every element in "a.b"
 	p.On("$.a.b[*]", func(key string, value struct{ C int }) error {
 		litter.Dump(value)
 		return nil
